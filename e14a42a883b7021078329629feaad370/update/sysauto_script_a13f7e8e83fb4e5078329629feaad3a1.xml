@@ -1,0 +1,696 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update table="sysauto_script">
+    <sysauto_script action="INSERT_OR_UPDATE">
+        <active>true</active>
+        <business_calendar/>
+        <condition/>
+        <conditional>false</conditional>
+        <entered_time>1970-01-01 00:00:00</entered_time>
+        <max_drift/>
+        <name>EIT_POLL_ALARMS_WITH_INVENTORY</name>
+        <offset/>
+        <offset_type>0</offset_type>
+        <run_as display_value="System Administrator">6816f79cc0a8016401c5a33be04be441</run_as>
+        <run_as_tz/>
+        <run_dayofmonth>1</run_dayofmonth>
+        <run_dayofweek>1</run_dayofweek>
+        <run_period>1970-01-01 00:00:05</run_period>
+        <run_start>2024-08-05 09:26:23</run_start>
+        <run_time>1970-01-01 08:00:00</run_time>
+        <run_type>periodically</run_type>
+        <script><![CDATA[
+/*
+ *  v1.0
+ */
+const SN_CURRENT_SCOPE_NAME = gs.getCurrentScopeName();
+const SnAbsoluteName = {
+    ofTable(label) {
+        return SN_CURRENT_SCOPE_NAME + '_' + label;
+    },
+
+    ofEndpoint(label) {
+        return SN_CURRENT_SCOPE_NAME + '.' + label;
+    }
+};
+
+const JOB_NAME = 'polling.1';
+const JOB_SNAPSHOT_FETCH_INTERVAL = 600000;
+const JOB_DELTA_FETCH_INTERVAL = 6000;
+
+const TABLE_INVENTORY = SnAbsoluteName.ofTable('eit_inventory');
+const TABLE_INVENTORY_SNAPSHOT = SnAbsoluteName.ofTable('eit_inventory_snapshot');
+const TABLE_INVENTORY_CHANGES_SNAPTHOT = SnAbsoluteName.ofTable('eit_inventory_changes_snapshot');
+const ENDPOINT_INVENTORY_SNAPSHOT = SnAbsoluteName.ofEndpoint('eit_inventory');
+const ENDPOINT_INVENTORY_CHANGES_SNAPSHOT = SnAbsoluteName.ofEndpoint('eit_inventory_changes');
+
+const TABLE_ALARM = SnAbsoluteName.ofTable('eit_alarm');
+const TABLE_ALARM_SNAPSHOT = SnAbsoluteName.ofTable('alarm_snapshot'); // TODO: create new table with eit_prefix
+const TABLE_ALARM_CHANGES_SNAPSHOT = SnAbsoluteName.ofTable('eit_alarm_changes_snapshot');
+const ENDPOINT_ALARM_SNAPSHOT = SnAbsoluteName.ofEndpoint('eit_alarms');
+const ENDPOINT_ALARM_CHANGES_SNAPSHOT = SnAbsoluteName.ofEndpoint('eit_alarm_changes');
+
+const TABLE_POLLING_STATE = SnAbsoluteName.ofTable('eit_polling_state');
+
+
+const EITIntegration = {
+    newRestMessage(eitConfig, outboundMessageName, requestName) {
+        /*
+        https://${eit_host}/rest/v1/organizations/${eit_org_id}/alarm-changes/${offset}
+          -H 'Authorization: {eit_bearer}'
+        */
+        let m = new sn_ws.RESTMessageV2(outboundMessageName, requestName);
+        m.setStringParameterNoEscape('eit_host', eitConfig.host);
+        m.setStringParameterNoEscape('eit_org_id', eitConfig.organizationId);
+        m.setStringParameterNoEscape('eit_bearer', `Bearer ${eitConfig.apiToken}`);
+        return m;
+    },
+
+    newRestMessageInventorySnapshot(eitConfig) {
+        return EITIntegration.newRestMessage(
+            eitConfig,
+            ENDPOINT_INVENTORY_SNAPSHOT,
+            'Default GET');
+    },
+
+    newRestMessageInventoryChangesSnapshot(eitConfig) {
+        return EITIntegration.newRestMessage(
+            eitConfig,
+            ENDPOINT_INVENTORY_CHANGES_SNAPSHOT,
+            'Default GET');
+    },
+
+    newRestMessageAlarmSnapshot(eitConfig) {
+        return EITIntegration.newRestMessage(
+            eitConfig,
+            ENDPOINT_ALARM_SNAPSHOT,
+            'Default GET');
+    },
+
+    newRestMessageAlarmChangesSnapshot(eitConfig) {
+        return EITIntegration.newRestMessage(
+            eitConfig,
+            ENDPOINT_ALARM_CHANGES_SNAPSHOT,
+            'Default GET');
+    }
+}
+
+const DbUtils = {
+    syncFrom(
+        idExtractor,
+        recordExistsById,
+        copyValues,
+        createRecordFrom,
+        chunkSize,
+        tableA,
+        tableB) {
+
+        const processedIds = new Set();
+
+        function processChunks() {
+            let grTableB = new GlideRecord(tableB);
+            grTableB.orderBy('sys_id'); // Order by sys_id to ensure consistent chunking
+
+            let lastSysId = '';
+            let keepProcessing = true;
+
+            while (keepProcessing) {
+                grTableB.addQuery('sys_id', '>', lastSysId);
+                grTableB.setLimit(chunkSize);
+                grTableB.query();
+
+                if (!grTableB.hasNext()) {
+                    keepProcessing = false;
+                }
+
+                while (grTableB.next()) {
+                    lastSysId = grTableB.sys_id.toString();
+
+                    let bId = idExtractor(grTableB).toString();
+                    processedIds.add(bId);
+
+                    let grTableA = new GlideRecord(tableA);
+                    if (recordExistsById(grTableA, bId)) {
+
+                        let needsUpdate = copyValues(grTableA, grTableB);
+                        if (needsUpdate) {
+                            grTableA.update();
+                        }
+                    } else {
+                        // Record does not exist, insert new record into Table A
+                        let newRecord = new GlideRecord(tableA);
+                        newRecord.initialize();
+                        createRecordFrom(newRecord, bId, grTableB);
+                        newRecord.insert();
+                    }
+                }
+            }
+        }
+
+        // Process records from Table B in chunks
+        processChunks();
+
+        // Now handle deletions in Table A
+        let grTableADelete = new GlideRecord(tableA);
+        grTableADelete.query();
+
+        while (grTableADelete.next()) {
+            let aId = idExtractor(grTableADelete).toString();
+            if (!processedIds.has(aId)) {
+                grTableADelete.deleteRecord();
+            }
+        }
+    },
+
+    copyColumnValues(srcTable, trgTable, names) {
+        names.forEach((e) => {
+            trgTable.setValue(e, srcTable.getValue(e));
+        });
+    }
+}
+
+const Inventory = {
+    makeFullSnapshot(previousOffset, eitConfig) {
+        try {
+            let r = EITIntegration.newRestMessageInventorySnapshot(eitConfig);
+
+            let response = r.execute();
+            let responseBody = response.getBody();
+            let responseObj = JSON.parse(responseBody);
+
+            let data = responseObj.inventoryObjects;
+            let offset = parseInt(responseObj.offset);
+
+            var db = new GlideRecord(TABLE_INVENTORY_SNAPSHOT);
+            db.query();
+            db.deleteMultiple();
+
+            data.forEach((e) => {
+
+                db.initialize();
+                db.setValue('inv_object_type', e.inventoryObjectType);
+                db.setValue('inv_id', e.id);
+                db.setValue('inv_label', e.label);
+
+                let objectType = String(e.inventoryObjectType);
+
+                if (objectType === "Organization") {
+                    // skip
+                }
+
+                if (objectType === "Location") {
+                    db.setValue('inv_type_id', e.type);
+                    db.setValue('inv_parent_id', e.parentId);
+
+                }
+
+                if (objectType === "Device") {
+                    db.setValue('inv_type_id', e.type);
+                    db.setValue('inv_parent_id', e.parentId);
+                    db.setValue('inv_location_id', e.locationId);
+                    db.setValue('inv_manufacturer_name', e.manufacturerName);
+                    db.setValue('inv_host_name', e.hostname);
+                    db.setValue('inv_ipv4', e.ipV4Addresses);
+                }
+
+                db.insert();
+            });
+
+            gs.info(`Inventory fetch entire state SNAPSHOT operation is complete. ` +
+                `offset=${offset}, totalRecords=${data.length}`);
+
+            return offset;
+
+        } catch (ex) {
+            gs.warn(`Inventory fetch entire state SNAPSHOT operation has failed: ${ex.message}`);
+        }
+    },
+
+    inventoryTableIdExtractor(grTable) {
+        return grTable.inv_id;
+    },
+
+    inventoryTableRecordExistsById(grTable, id) {
+        return grTable.get('inv_id', id);
+    },
+
+    inventoryTableCopyValues(grTA, grTB) {
+        let needsUpdate = false;
+
+        if (grTA.inv_label !== grTB.inv_label) {
+            grTA.inv_label = grTB.inv_label;
+            needsUpdate = true;
+        }
+
+        if (grTA.inv_parent_id !== grTB.inv_parent_id) {
+            grTA.inv_parent_id = grTB.inv_parent_id;
+            needsUpdate = true;
+        }
+
+        if (grTA.inv_location_id !== grTB.inv_location_id) {
+            grTA.inv_location_id = grTB.inv_location_id;
+            needsUpdate = true;
+        }
+
+        if (grTA.inv_type_id !== grTB.inv_type_id) {
+            grTA.inv_type_id = grTB.inv_type_id;
+            needsUpdate = true;
+        }
+
+        if (grTA.inv_manufacturer_name !==
+            grTB.inv_manufacturer_name) {
+            grTA.inv_manufacturer_name = grTB.inv_manufacturer_name;
+            needsUpdate = true;
+        }
+
+        if (grTA.inv_host_name !== grTB.inv_host_name) {
+            grTA.inv_host_name = grTB.inv_host_name;
+            needsUpdate = true;
+        }
+
+        return needsUpdate;
+    },
+
+    inventoryCreateRecordFrom(newRecord, id, grTableB) {
+        newRecord.inv_id = grTableB.inv_id;
+        newRecord.inv_label = grTableB.inv_label;
+        newRecord.inv_parent_id = grTableB.inv_parent_id;
+        newRecord.inv_location_id = grTableB.inv_location_id;
+        newRecord.inv_type_id = grTableB.inv_type_id;
+        newRecord.inv_manufacturer_name = grTableB.inv_manufacturer_name;
+        newRecord.inv_host_name = grTableB.inv_host_name;
+        return newRecord;
+    },
+
+    inventorySyncDataWithSnapshot(previousOffset, offset) {
+        DbUtils.syncFrom(
+            Inventory.inventoryTableIdExtractor,
+            Inventory.inventoryTableRecordExistsById,
+            Inventory.inventoryTableCopyValues,
+            Inventory.inventoryCreateRecordFrom,
+            500,
+            TABLE_INVENTORY,
+            TABLE_INVENTORY_SNAPSHOT);
+
+        return offset;
+    },
+
+    syncDataWithDeltaSnapshot(previousOffset, offset) {
+        let dbInventory = new GlideRecord(TABLE_INVENTORY);
+
+        let dbChanges = new GlideRecord(TABLE_INVENTORY_CHANGES_SNAPTHOT);
+        dbChanges.query();
+
+        let syncColNames = [
+            'inv_id',
+            'inv_object_type',
+            'inv_label',
+            'inv_parent_id',
+            'inv_type_id',
+            'inv_manufacturer_name',
+            'inv_host_name',
+            'inv_ipv4'
+        ];
+
+        while (dbChanges.next()) {
+            let operation = String(dbChanges.inv_operation);
+            let invId = dbChanges.inv_id;
+
+            if (operation === "InventoryObjectCreateOrUpdate") {
+                dbInventory.addQuery('inv_id', invId);
+                dbInventory.query();
+                if (dbInventory.next()) {
+                    DbUtils.copyColumnValues(dbChanges, dbInventory, syncColNames);
+                    dbInventory.update();
+                } else {
+                    dbInventory.initialize();
+                    DbUtils.copyColumnValues(dbChanges, dbInventory, syncColNames);
+                    dbInventory.insert();
+
+                }
+            }
+
+            if (operation === "InventoryObjectDelete") {
+                dbInventory.addQuery('inv_id', invId);
+                dbInventory.query();
+                if (dbInventory.next()) {
+                    dbInventory.deleteRecord();
+                }
+            }
+        }
+
+        return offset;
+    },
+
+    makeChangesSnapshot(previousOffset, eitConfig) {
+        try {
+            let r = EITIntegration.newRestMessageInventoryChangesSnapshot(eitConfig);
+            r.setStringParameterNoEscape('offset', previousOffset.toString());
+            let response = r.execute();
+            let responseBody = response.getBody();
+            let responseObj = JSON.parse(responseBody);
+            //let httpStatus = response.getStatusCode();
+
+            let data = responseObj.inventoryObjectChanges;
+            let offset = parseInt(responseObj.offset);
+
+            let db = new GlideRecord(TABLE_INVENTORY_CHANGES_SNAPTHOT);
+            db.query();
+            db.deleteMultiple();
+
+            data.forEach((e) => {
+
+                db.initialize();
+                db.setValue('inv_operation', e.operation);
+                let operation = String(e.operation);
+
+                if (operation === "InventoryObjectCreateOrUpdate") {
+                    let inventoryObject = e.inventoryObject;
+
+                    db.setValue('inv_object_type', inventoryObject.inventoryObjectType);
+                    db.setValue('inv_id', inventoryObject.id);
+                    db.setValue('inv_label', inventoryObject.label);
+                    db.setValue('inv_parent_id', inventoryObject.parentId);
+                    db.setValue('inv_type_id', inventoryObject.type);
+
+                    if (inventoryObject.inventoryObjectType === "Device") {
+                        db.setValue('inv_manufacturer_name',
+                            inventoryObject.manufacturerName);
+                        db.setValue('inv_host_name', inventoryObject.hostname);
+                    }
+                }
+
+                if (operation === "InventoryObjectDelete") {
+                    db.setValue('inv_id', e.inventoryObjectId);
+                }
+
+                db.insert();
+            });
+
+            gs.info(`Inventory fetch CHANGES operation is complete. ` +
+                `previousOffset=${previousOffset}, offset=${offset}, totalRecords=${data.length}`);
+
+            return offset;
+        } catch (ex) {
+            gs.warn(`Inventory fetch CHANGES operation has failed: ${ex.message}`);
+        }
+    }
+};
+
+const Alarm = {
+
+    makeFullSnapshot(previousOffset, eitConfig) {
+        try {
+            let r = EITIntegration.newRestMessageAlarmSnapshot(eitConfig);
+
+            let response = r.execute();
+            let responseBody = response.getBody();
+            let responseObj = JSON.parse(responseBody);
+
+            let data = responseObj.alarms;
+            let offset = parseInt(responseObj.offset);
+
+            var db = new GlideRecord(TABLE_ALARM_SNAPSHOT);
+            db.query();
+            db.deleteMultiple();
+
+            data.forEach((e) => {
+                db.initialize();
+                db.setValue('arm_id', e.id);
+                db.setValue('arm_device_id', e.deviceId);
+                db.setValue('arm_label', e.label);
+                db.setValue('arm_message', e.message);
+                db.setValue('arm_severity', e.severity);
+                db.setValue('arm_activated_time', e.activatedTime);
+                db.setValue('arm_cleared_time', e.clearedTime);
+                db.insert();
+            });
+
+            gs.info(`Alarm fetch entire state SNAPSHOT operation is complete. ` +
+                `offset=${offset}, totalRecords=${data.length}`);
+
+            return offset;
+
+        } catch (ex) {
+            gs.warn(`Alarm fetch entire state SNAPSHOT operation has failed: ${ex.message}`);
+        }
+    },
+
+    makeChangesSnapshot(previousOffset, eitConfig) {
+        try {
+            let r = EITIntegration.newRestMessageAlarmChangesSnapshot(eitConfig);
+            r.setStringParameterNoEscape('offset', previousOffset.toString());
+
+            let response = r.execute();
+            let responseBody = response.getBody();
+            let responseObj = JSON.parse(responseBody);
+            //let httpStatus = response.getStatusCode();
+
+            let data = responseObj.alarms;
+            let offset = parseInt(responseObj.offset);
+
+            var db = new GlideRecord(TABLE_ALARM_CHANGES_SNAPSHOT);
+            db.query();
+            db.deleteMultiple();
+
+            data.forEach((e) => {
+                db.initialize();
+                db.setValue('arm_id', e.id);
+                db.setValue('arm_device_id', e.deviceId);
+                db.setValue('arm_label', e.label);
+                db.setValue('arm_message', e.message);
+                db.setValue('arm_severity', e.severity);
+                db.setValue('arm_activated_time', e.activatedTime);
+                db.setValue('arm_cleared_time', e.clearedTime);
+                db.insert();
+            });
+
+            gs.info(`Alarms fetch CHANGES operation is complete. ` +
+                `previousOffset=${previousOffset}, offset=${offset}, totalRecords=${data.length}`);
+
+            return offset;
+        } catch (ex) {
+            gs.warn(`Alarms fetch CHANGES operation has failed: ${ex.message}`);
+        }
+    },
+
+    syncDataWithSnapshot(previousOffset, offset) {
+        let tableIdExtractor = (grTable) => {
+            return grTable.arm_id;
+        };
+
+        let tableRecordExistsById = (grTable, id) => {
+            return grTable.get('arm_id', id);
+        };
+
+        let tableCopyValues = (grTA, grTB) => {
+            let cols = [
+                'arm_id',
+                'arm_device_id',
+                'arm_label',
+                'arm_message',
+                'arm_severity',
+                'arm_activated_time',
+                'arm_cleared_time'
+            ];
+
+            let needsUpdate = false;
+
+            for (let i = 0; i < cols.length; i++) {
+                let c = cols[i];
+                if (grTA.getValue(c) !== grTB.getValue(c)) {
+                    grTA.setValue(c, grTB.getValue(c));
+                    needsUpdate = true;
+                }
+            }
+
+            return needsUpdate;
+        };
+
+        let tableCreateRecordFrom = (newRecord, id, grTableB) => {
+            let cols = [
+                'arm_id',
+                'arm_device_id',
+                'arm_label',
+                'arm_message',
+                'arm_severity',
+                'arm_activated_time',
+                'arm_cleared_time'
+            ];
+
+            for (let i = 0; i < cols.length; i++) {
+                let c = cols[i];
+                newRecord.setValue(c, grTableB.getValue(c));
+            }
+
+            return newRecord;
+        };
+
+        DbUtils.syncFrom(
+            tableIdExtractor,
+            tableRecordExistsById,
+            tableCopyValues,
+            tableCreateRecordFrom,
+            500,
+            TABLE_ALARM,
+            TABLE_ALARM_SNAPSHOT);
+
+        return offset;
+    },
+
+    syncDataWithDeltaSnapshot(previousOffset, offset) {
+        let trgDb = new GlideRecord(TABLE_ALARM);
+
+        let changesDb = new GlideRecord(TABLE_ALARM_CHANGES_SNAPSHOT);
+        changesDb.query();
+
+        let syncColNames = [
+            'arm_id',
+            'arm_device_id',
+            'arm_label',
+            'arm_message',
+            'arm_severity',
+            'arm_activated_time',
+            'arm_cleared_time'
+        ];
+
+        while (changesDb.next()) {
+            let id = changesDb.arm_id;
+
+            trgDb.addQuery('arm_id', id);
+            trgDb.query();
+
+            if (trgDb.next()) {
+                DbUtils.copyColumnValues(changesDb, trgDb, syncColNames);
+                trgDb.update();
+            } else {
+                trgDb.initialize();
+                DbUtils.copyColumnValues(changesDb, trgDb, syncColNames);
+                trgDb.insert();
+            }
+        }
+
+        return offset;
+    }
+
+};
+
+const App = {
+    elapsedTimeFrom(dt) {
+        let lastUpdate = new GlideDateTime(dt).getNumericValue();
+        return new GlideDateTime().getNumericValue() - lastUpdate;
+    },
+
+    syncFullDataFunction(makeFullSnapshot, syncDataWithSnapshot) {
+        return (previousOffset, eitConfig) => {
+            let offset = makeFullSnapshot(previousOffset, eitConfig);
+            syncDataWithSnapshot(previousOffset, offset);
+            return offset;
+        };
+    },
+
+    syncChangesDataFunction(makeChangesSnapshot, syncDataWithDeltaSnapshot) {
+        return (previousOffset, eitConfig) => {
+            let offset = makeChangesSnapshot(previousOffset, eitConfig);
+            syncDataWithDeltaSnapshot(previousOffset, offset);
+            return offset;
+        }
+    }
+};
+
+
+function main(jobDescription) {
+    let thisName = jobDescription.name;
+    let inventoryFullFetchInterval = jobDescription.inventoryFullFetchInterval;
+    let inventoryDeltaFetchInterval = jobDescription.inventoryDeltaFetchInterval;
+    let alarmsFullFetchInterval = jobDescription.alarmsFullFetchInterval;
+    let alarmsDeltaFetchInterval = jobDescription.alarmsDeltaFetchInterval;
+    let syncFullInventoryData = jobDescription.syncFullInventoryData;
+    let syncDeltaInventoryData = jobDescription.syncDeltaInventoryData;
+    let syncFullAlarmData = jobDescription.syncFullAlarmData;
+    let syncDeltaAlarmData = jobDescription.syncDeltaAlarmData;
+
+    let jobs = new GlideRecord(TABLE_POLLING_STATE);
+    jobs.addQuery('job_name', thisName);
+    jobs.query();
+    if (!jobs.next()) {
+        gs.warn(`The job is misconfigured: No data found in ${TABLE_POLLING_STATE} for ${thisName}`);
+        return;
+    }
+
+    let eitConfig = {
+        host: jobs.getValue('config_host'),
+        organizationId: jobs.getValue('config_organization_id'),
+        apiToken: jobs.getValue('config_api_token')
+    };
+
+    let et = App.elapsedTimeFrom(jobs.executed_at);
+
+    gs.info(`Preparing to execute the job. The job was last executed ${et} milliseconds ago`);
+
+    if (App.elapsedTimeFrom(jobs.fetched_full_inventory_at) > inventoryFullFetchInterval) {
+        jobs.inventory_offset = syncFullInventoryData(parseInt(jobs.inventory_offset), eitConfig);
+        jobs.fetched_full_inventory_at = new GlideDateTime();
+
+    } else if (App.elapsedTimeFrom(jobs.fetched_delta_inventory_at) > inventoryDeltaFetchInterval) {
+        jobs.inventory_offset = syncDeltaInventoryData(parseInt(jobs.inventory_offset), eitConfig);
+        jobs.fetched_delta_inventory_at = new GlideDateTime();
+    }
+
+    if (App.elapsedTimeFrom(jobs.fetched_full_alarms_at) > alarmsFullFetchInterval) {
+        jobs.alarms_offset = syncFullAlarmData(parseInt(jobs.alarms_offset), eitConfig);
+        jobs.fetched_full_alarms_at = new GlideDateTime();
+    } else if (App.elapsedTimeFrom(jobs.fetched_delta_alarms_at) > alarmsDeltaFetchInterval) {
+        jobs.alarms_offset = syncDeltaAlarmData(parseInt(jobs.alarms_offset), eitConfig);
+        jobs.fetched_delta_alarms_at = new GlideDateTime();
+    }
+
+    jobs.executed_at = new GlideDateTime();
+    jobs.update();
+    gs.info(`The job has been completed`);
+}
+
+(function exec() {
+    try {
+        main({
+            name: JOB_NAME,
+            inventoryFullFetchInterval: JOB_SNAPSHOT_FETCH_INTERVAL,
+            inventoryDeltaFetchInterval: JOB_DELTA_FETCH_INTERVAL,
+            alarmsFullFetchInterval: JOB_SNAPSHOT_FETCH_INTERVAL,
+            alarmsDeltaFetchInterval: JOB_DELTA_FETCH_INTERVAL,
+            syncFullInventoryData: App.syncFullDataFunction(
+                Inventory.makeFullSnapshot,
+                Inventory.inventorySyncDataWithSnapshot),
+            syncDeltaInventoryData: App.syncChangesDataFunction(
+                Inventory.makeChangesSnapshot,
+                Inventory.syncDataWithDeltaSnapshot
+            ),
+            syncFullAlarmData: App.syncFullDataFunction(
+                Alarm.makeFullSnapshot,
+                Alarm.syncDataWithSnapshot
+            ),
+            syncDeltaAlarmData: App.syncChangesDataFunction(
+                Alarm.makeChangesSnapshot,
+                Alarm.syncDataWithDeltaSnapshot
+            ),
+        });
+    } catch (e) {
+        gs.error(`Unable to complete the script: ${e.message}`);
+    }
+})();
+
+]]></script>
+        <sys_class_name>sysauto_script</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2024-08-05 09:26:52</sys_created_on>
+        <sys_id>a13f7e8e83fb4e5078329629feaad3a1</sys_id>
+        <sys_mod_count>57</sys_mod_count>
+        <sys_name>EIT_POLL_ALARMS_WITH_INVENTORY</sys_name>
+        <sys_package display_value="EcoStructure" source="x_1459397_ecostr_1">e14a42a883b7021078329629feaad370</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="EcoStructure">e14a42a883b7021078329629feaad370</sys_scope>
+        <sys_update_name>sysauto_script_a13f7e8e83fb4e5078329629feaad3a1</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2024-08-06 23:24:27</sys_updated_on>
+        <time_zone/>
+        <upgrade_safe>false</upgrade_safe>
+    </sysauto_script>
+</record_update>
