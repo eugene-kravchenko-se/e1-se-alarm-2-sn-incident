@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?><database>
+    <element db_object_id="b5f3f6ea83734a9078329629feaad353" label="EIT_ALARM_TO_INCIDENTS" max_length="40" name="x_1459397_ecostr_1_eit_alarm_to_incidents" type="collection">
+        <element label="Arm ID" max_length="255" name="arm_id" type="string_full_utf8"/>
+        <element label="Ind sys ID" max_length="255" name="ind_sys_id" type="string_full_utf8"/>
+    </element>
+</database>
