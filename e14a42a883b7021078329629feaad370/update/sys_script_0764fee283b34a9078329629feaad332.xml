@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?><record_update sys_domain="global" table="sys_script">
+    <sys_script action="INSERT_OR_UPDATE">
+        <abort_action>false</abort_action>
+        <access>package_private</access>
+        <action_delete>false</action_delete>
+        <action_insert>true</action_insert>
+        <action_query>false</action_query>
+        <action_update>false</action_update>
+        <active>true</active>
+        <add_message>false</add_message>
+        <advanced>true</advanced>
+        <change_fields>false</change_fields>
+        <client_callable>false</client_callable>
+        <collection>x_1459397_ecostr_1_eit_alarm</collection>
+        <condition/>
+        <description/>
+        <execute_function>false</execute_function>
+        <filter_condition/>
+        <is_rest>false</is_rest>
+        <message/>
+        <name>EIT_OPEN_INCIDENT_BY_NEW_ALARM</name>
+        <order>100</order>
+        <priority>100</priority>
+        <rest_method/>
+        <rest_method_text/>
+        <rest_service/>
+        <rest_service_text/>
+        <rest_variables/>
+        <role_conditions/>
+        <script><![CDATA[(function executeRule(current, previous /*null when async*/) {
+
+    const SN_CURRENT_SCOPE_NAME = gs.getCurrentScopeName();
+    const SnAbsoluteName = {
+        ofTable(label) {
+            return SN_CURRENT_SCOPE_NAME + '_' + label;
+        }
+    };
+
+    const TABLE_INVENTORY = SnAbsoluteName.ofTable('eit_inventory');
+    const TABLE_ALARM_TO_INCIDENTS = SnAbsoluteName.ofTable('eit_alarm_to_incidents');
+
+    function lookupLabels(db, id) {
+        let acc = [];
+        let nextId = id;
+
+        while (nextId !== undefined) {
+            if (db.get('inv_id', nextId)) {
+                let label = db.inv_label.toString();
+                acc.push(label);
+
+                let parentId = db.inv_parent_id.toString();
+                if (parentId === undefined || parentId === "undefined" || parentId === "undefined") {
+                    break;
+                } else {
+                    nextId = parentId;
+                }
+            } else {
+                break;
+            }
+        }
+
+        return acc;
+    }
+
+    function getLocationIdForDeviceId(db, deviceId) {
+        if (db.get('inv_id', deviceId)) {
+            return db.inv_location_id.toString();
+        } else {
+            return undefined;
+        }
+    }
+
+    const alarmId = current.arm_id.toString();
+    const alarmLabel = current.arm_label.toString();
+    const alarmMessage = current.arm_message.toString();
+    const deviceId = current.arm_device_id.toString();
+
+    let incidentSysId = undefined;
+
+    try {
+        let inventoryDb = new GlideRecord(TABLE_INVENTORY);
+        let deviceLabels = lookupLabels(inventoryDb, deviceId);
+        let locations = lookupLabels(inventoryDb, getLocationIdForDeviceId(inventoryDb, deviceId));
+
+        let incidents = new GlideRecord('incident');
+        incidents.initialize();
+        incidents.description = `Alarm EIT ID: ${alarmId}\n${alarmMessage}\n${locations.reverse().join(" > ")}`;
+        incidents.short_description = `eit alarm: ${alarmLabel} (${deviceLabels.join(" :: ")})`;
+        incidentSysId = incidents.insert();
+        gs.info(`A new incident has been created. incidentSysId=${incidentSysId}`);
+    } catch (ex) {
+        gs.error(`Failed to create a new incident: ${ex.message}`);
+        return;
+    }
+
+    try {
+        let alarmByIncident = new GlideRecord(TABLE_ALARM_TO_INCIDENTS);
+        alarmByIncident.initialize();
+        alarmByIncident.arm_id = alarmId;
+        alarmByIncident.ind_sys_id = incidentSysId;
+        alarmByIncident.insert();
+        gs.info(`Link information has been saved. incidentSysId=${incidentSysId}, alarmId=${alarmId}`);
+    } catch (ex) {
+        gs.error(`Unable to create a link between the alarm and the incident: ${ex.message}.`
+            + ` incidentSysId=${incidentSysId}, alarmId=${alarmId} `);
+    }
+})(current, previous);]]></script>
+        <sys_class_name>sys_script</sys_class_name>
+        <sys_created_by>admin</sys_created_by>
+        <sys_created_on>2024-08-06 21:57:24</sys_created_on>
+        <sys_domain>global</sys_domain>
+        <sys_domain_path>/</sys_domain_path>
+        <sys_id>0764fee283b34a9078329629feaad332</sys_id>
+        <sys_mod_count>22</sys_mod_count>
+        <sys_name>EIT_OPEN_INCIDENT_BY_NEW_ALARM</sys_name>
+        <sys_overrides/>
+        <sys_package display_value="EcoStructure" source="x_1459397_ecostr_1">e14a42a883b7021078329629feaad370</sys_package>
+        <sys_policy/>
+        <sys_scope display_value="EcoStructure">e14a42a883b7021078329629feaad370</sys_scope>
+        <sys_update_name>sys_script_0764fee283b34a9078329629feaad332</sys_update_name>
+        <sys_updated_by>admin</sys_updated_by>
+        <sys_updated_on>2024-09-02 17:44:54</sys_updated_on>
+        <template/>
+        <when>after</when>
+    </sys_script>
+    <sys_translated_text action="delete_multiple" query="documentkey=0764fee283b34a9078329629feaad332"/>
+</record_update>
