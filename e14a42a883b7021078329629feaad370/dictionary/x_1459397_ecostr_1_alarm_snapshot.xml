@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?><database>
+    <element db_object_id="c392162e83f30a9078329629feaad39b" label="EIT_ALARM_SNAPSHOT" max_length="40" name="x_1459397_ecostr_1_alarm_snapshot" type="collection">
+        <element label="Arm ID" max_length="255" name="arm_id" type="string_full_utf8"/>
+        <element label="Arm activated time" max_length="255" name="arm_activated_time" type="string_full_utf8"/>
+        <element label="Arm message" max_length="255" name="arm_message" type="string_full_utf8"/>
+        <element label="Arm device ID" max_length="255" name="arm_device_id" type="string_full_utf8"/>
+        <element label="Arm severity" max_length="255" name="arm_severity" type="string_full_utf8"/>
+        <element label="Arm label" max_length="255" name="arm_label" type="string_full_utf8"/>
+        <element label="Arm cleared time" max_length="255" name="arm_cleared_time" type="string_full_utf8"/>
+    </element>
+</database>

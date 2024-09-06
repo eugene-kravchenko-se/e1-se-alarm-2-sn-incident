@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?><database>
+    <element db_object_id="d91a59128333429078329629feaad343" label="EIT_INVENTORY_CHANGES_SNAPSHOT" max_length="40" name="x_1459397_ecostr_1_eit_inventory_changes_snapshot" type="collection">
+        <element label="Inv manufacturer name" max_length="255" name="inv_manufacturer_name" type="string_full_utf8"/>
+        <element label="Inv host name" max_length="255" name="inv_host_name" type="string_full_utf8"/>
+        <element label="Inv label" max_length="255" name="inv_label" type="string_full_utf8"/>
+        <element label="Inv parent ID" max_length="255" name="inv_parent_id" type="string_full_utf8"/>
+        <element label="Inv operation" max_length="255" name="inv_operation" type="string_full_utf8"/>
+        <element label="Inv type ID" max_length="255" name="inv_type_id" type="string_full_utf8"/>
+        <element label="Inv object type" max_length="255" name="inv_object_type" type="string_full_utf8"/>
+        <element label="Inv ID" max_length="255" name="inv_id" type="string_full_utf8"/>
+        <element label="Inv location ID" max_length="255" name="inv_location_id" type="string_full_utf8"/>
+    </element>
+</database>
