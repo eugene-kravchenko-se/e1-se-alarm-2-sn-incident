@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?><database>
+    <element db_object_id="ba3e360683fb4e5078329629feaad33f" label="EIT_POLLING_STATE" max_length="40" name="x_1459397_ecostr_1_eit_polling_state" type="collection">
+        <element label="Executed at" max_length="40" name="executed_at" type="glide_date_time"/>
+        <element label="Config organization ID" max_length="255" name="config_organization_id" type="string_full_utf8"/>
+        <element default="0" label="Inventory offset" max_length="19" name="inventory_offset" type="longint"/>
+        <element default="0" label="Alarms offset" max_length="19" name="alarms_offset" type="longint"/>
+        <element label="Fetched delta inventory at" max_length="40" name="fetched_delta_inventory_at" type="glide_date_time"/>
+        <element label="Config api token" max_length="255" name="config_api_token" type="string_full_utf8"/>
+        <element display="true" label="Job name" max_length="512" name="job_name" type="string"/>
+        <element label="Config host" max_length="255" name="config_host" type="string_full_utf8"/>
+        <element label="Fetched full inventory at" max_length="40" name="fetched_full_inventory_at" type="glide_date_time"/>
+        <element label="Fetched delta alarms at" max_length="40" name="fetched_delta_alarms_at" type="glide_date_time"/>
+        <element label="Fetched full alarms at" max_length="40" name="fetched_full_alarms_at" type="glide_date_time"/>
+    </element>
+</database>
